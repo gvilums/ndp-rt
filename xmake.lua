@@ -4,13 +4,13 @@ set_languages("cxx20")
 
 target("ndp-rt")
     set_kind("static")
-    add_includedirs("src", {public = true})
+    add_includedirs("include", {public = true})
     add_files("src/*.cpp")
 
--- target("test")
-    -- set_kind("binary")
-    -- add_files("test/*.cpp")
-    -- add_deps("ndp-rt")
+target("test")
+    set_kind("binary")
+    add_files("test/*.cpp")
+    add_deps("ndp-rt")
 
 --
 -- If you want to known more usage about xmake, please see https://xmake.io

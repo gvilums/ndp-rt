@@ -1,4 +1,4 @@
-#include "rt.hpp"
+#include <ndp/rt.hpp>
 #include <iostream>
 
 
@@ -12,8 +12,9 @@ void func(void* args) {
 }
 
 int main() {
+    ndp::configure(16);
     for (size_t i = 0; i < 64; ++i) {
-        ndp::thread_launch(i % 2, func, new size_t{i});
+        ndp::thread_launch(i % 16, func, (void*)new size_t{i});
     }
     ndp::run();
 }
