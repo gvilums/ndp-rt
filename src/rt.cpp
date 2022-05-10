@@ -4,6 +4,7 @@
 #include <thread>
 #include <vector>
 #include <barrier>
+#include <mutex>
 
 #include "rt.hpp"
 
@@ -15,17 +16,69 @@ constexpr size_t sync_interval = 1000;
 
 struct ThreadData {
     size_t core_id{0};
-    size_t id{0};
     size_t cycles{0};
     size_t instructions{0};
+
+	std::atomic_bool running{false}; 
+
+	std::mutex list_lock;
+	ThreadData* next_thread{nullptr};
+	ThreadData* prev_thread{nullptr};
+
+	void link_into(ThreadData* td) {
+		std::lock_guard lg{td->list_lock};
+		if (td->next_thread != td) {
+			std::lock_guard nlg{td->next_thread->list_lock};
+
+			this->prev_thread = td;
+			this->next_thread = td->next_thread;
+
+			td->next_thread->prev_thread = this;
+			td->next_thread = this;
+		} else {
+			// td is alone in linked list
+			this->next_thread = td;
+			this->prev_thread = td;
+
+			td->next_thread = this;
+			td->prev_thread = this;
+		}
+	}
+
+	void unlink() {
+		if (this->next_thread != this) {
+			if (this->prev_thread != this->next_thread) {
+				// td is in list of three or more threads
+				std::lock_guard plg{this->prev_thread->list_lock};
+				std::lock_guard nlg{this->next_thread->list_lock};
+
+				this->prev_thread->next_thread = this->next_thread;
+				this->next_thread->prev_thread = this->prev_thread;
+			} else {
+				// this is in list of two threads
+				this->prev_thread->next_thread = this->prev_thread;
+				this->prev_thread->prev_thread = this->prev_thread;
+			}
+		} 
+	}
 };
 
 thread_local ThreadData tdata{};
 
 struct CoreState {
-    std::atomic_size_t running_tid{0};
-    std::atomic_size_t next_tid{0};
-    std::atomic_size_t total_threads{0};
+	std::mutex list_lock;
+	ThreadData* head_thread;
+
+	void add_thread(ThreadData* td) {
+		std::lock_guard lg{this->list_lock};
+		if (this->head_thread) {
+			td->link_into(this->head_thread);
+		} else {
+			td->next_thread = td;
+			td->prev_thread = td;
+			this->head_thread = td;
+		}
+	}
 };
 
 struct SystemState {
@@ -58,10 +111,7 @@ void thread_sync() {
     sys_state.resume1.wait(false);
 
     // wait until this core is scheduled
-    auto& core = sys_state.cores[tdata.core_id];
-    for (size_t tid = core.running_tid; tid != tdata.id; tid = core.running_tid) {
-        core.running_tid.wait(tid);
-    }
+	tdata.running.wait(false);
 
 	// wait until main thread is done updating schedule
 	sys_state.resume2.wait(false);
@@ -84,16 +134,45 @@ void thread_sync() {
 }
 
 void launch_trampoline(size_t this_core_id, void (*func)(void*), void* args) {
+	auto& core = sys_state.cores[this_core_id];
     // set up thread local variables
     tdata.core_id = this_core_id;
-    tdata.id = sys_state.cores[this_core_id].next_tid.fetch_add(1);
+    // tdata.id = sys_state.cores[this_core_id].next_tid.fetch_add(1);
+
+	core.list_lock.lock();
+	if (core.head_thread) {
+		core.head_thread->list_lock.lock();
+		auto* next = core.head_thread->next_thread;
+		if (next != core.head_thread) {
+			next->list_lock.lock();
+			core.head_thread->next_thread = &tdata;
+			tdata.next_thread = next;
+			next->list_lock.unlock();
+		} else{
+			core.head_thread->next_thread = &tdata;
+			tdata.next_thread = core.head_thread;
+		}
+		core.head_thread->list_lock.unlock();
+	} else {
+		tdata.next_thread = &tdata;
+		core.head_thread = &tdata;
+	}
+	core.list_lock.unlock();
 
     // wait until other threads reach sync point
     thread_sync();
     // execute function (this will probably call back into thread_sync() at some point
     func(args);
-    // clean up TODO this does not make sense yet
-	sys_state.cores[tdata.core_id].total_threads -= 1;
+
+	// unlink this thread from data structures
+	tdata.unlink();
+	core.list_lock.lock();
+	if (core.head_thread == &tdata) {
+		core.head_thread = nullptr;
+	}
+	core.list_lock.unlock();
+
+
     sys_state.running_threads -= 1;
     sys_state.total_threads -= 1;
 }
@@ -102,7 +181,7 @@ void thread_launch(size_t core_id, void (*func)(void*), void* args) {
     // important to do this now, guarantees that main thread does not accidentally start cleanup
     sys_state.total_threads += 1;
     sys_state.running_threads += 1;
-	sys_state.cores[core_id].total_threads += 1;
+	// sys_state.cores[core_id].total_threads += 1;
     // create thread and detach to run independently of handle
     std::thread t{launch_trampoline, core_id, func, args};
     t.detach();
@@ -129,12 +208,23 @@ void run() {
 		// for each core with pending threads, reschedule
 		size_t total_populated_cores = 0;
 		for (auto& core : sys_state.cores) {
-			if (core.total_threads > 0) {
-				core.running_tid = (core.running_tid + 1) % core.total_threads;
-				// wake up threads
-				core.running_tid.notify_all();
+			if (core.head_thread) {
+				// reschedule
+				core.head_thread->running = false;
+				auto* next = core.head_thread->next_thread;
+				next->running = true;
+				next->running.notify_all();
+
+				core.head_thread = next;
+
 				total_populated_cores += 1;
 			}
+			// if (core.total_threads > 0) {
+			// 	core.running_tid = (core.running_tid + 1) % core.total_threads;
+			// 	// wake up threads
+			// 	core.running_tid.notify_all();
+			// 	total_populated_cores += 1;
+			// }
 		}
 
 		sys_state.running_threads = total_populated_cores;
