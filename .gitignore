@@ -7,5 +7,7 @@ build/
 
 # MacOS Cache
 .DS_Store
+a.out
+prog
 
 

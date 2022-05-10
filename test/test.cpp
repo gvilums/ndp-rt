@@ -12,7 +12,7 @@ void func(void* args) {
 
 int main() {
     for (int i = 0; i < 4; ++i) {
-        ndp::thread_launch(i % 2, func, &i);
+        ndp::thread_launch(i % 2, func, new int{i});
     }
     ndp::run();
 }

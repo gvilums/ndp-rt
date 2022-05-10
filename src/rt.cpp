@@ -11,7 +11,7 @@ namespace ndp {
 
 // TODO make this configurable
 constexpr size_t core_count = 2;
-constexpr size_t sync_interval = 30;
+constexpr size_t sync_interval = 1000;
 
 struct ThreadData {
     size_t core_id{0};
@@ -29,15 +29,11 @@ struct CoreState {
 };
 
 struct SystemState {
-    std::atomic_size_t running_threads{0};
     std::atomic_size_t total_threads{0};
 
-	// temporary
-    std::atomic_size_t started_threads{0};
 	std::atomic_size_t scheduled_threads{0};
-	// temporary
-	std::barrier<> sync1{3};
-	std::barrier<> sync2{3};
+    std::atomic_size_t started_threads{0};
+    std::atomic_size_t running_threads{0};
 
     std::atomic_bool resume1{false};
 	std::atomic_bool resume2{false};
@@ -54,7 +50,6 @@ SystemState sys_state{};
 void thread_sync() {
     sys_state.resume1 = false;
     sys_state.running_threads -= 1;
-	std::cout << "decrement for thread sync: " << sys_state.running_threads << std::endl;;
 	// if we are last to sync, notify main thread
 	if (sys_state.running_threads == 0) {
 		sys_state.running_threads.notify_all();
@@ -71,14 +66,17 @@ void thread_sync() {
 	// wait until main thread is done updating schedule
 	sys_state.resume2.wait(false);
 
+	// reset counters
+	tdata.cycles = 0;
+	tdata.instructions = 0;
+
 	// start this thread (indicating that we have passed both wait points). If we are last to start, notify waiters
 	size_t started = sys_state.started_threads.fetch_add(1);
 	if (started + 1 == sys_state.running_threads) {
 		sys_state.started_threads.notify_all();
 	}
 
-
-	// wait until all scheduled threads have started
+	// wait until all scheduled threads have started (passed both wait points)
     for (size_t started = sys_state.started_threads; started != sys_state.scheduled_threads; started = sys_state.started_threads) {
         sys_state.started_threads.wait(started);
     }
@@ -105,7 +103,6 @@ void thread_launch(size_t core_id, void (*func)(void*), void* args) {
     sys_state.total_threads += 1;
     sys_state.running_threads += 1;
 	sys_state.cores[core_id].total_threads += 1;
-	std::cout << "increment for thread launch: " << sys_state.running_threads << std::endl;;
     // create thread and detach to run independently of handle
     std::thread t{launch_trampoline, core_id, func, args};
     t.detach();
@@ -125,7 +122,9 @@ void run() {
         }
 		// set barrier to prevent threads woken up during core update from immediately beginning execution
 		sys_state.resume2 = false;
+
 		// perform state updates (nothing yet)
+		std::cout << "synchronized!" << std::endl;
 
 		// for each core with pending threads, reschedule
 		size_t total_populated_cores = 0;
@@ -141,8 +140,6 @@ void run() {
 		sys_state.running_threads = total_populated_cores;
 		sys_state.scheduled_threads = total_populated_cores;
 		sys_state.started_threads = 0;
-
-		std::cout << "increment after sync: " << sys_state.running_threads << std::endl;;
 
 		// notify threads that just ran to enter waiting loop to get rescheduled
 		sys_state.resume1 = true;
