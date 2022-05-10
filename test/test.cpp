@@ -4,15 +4,16 @@
 
 [[ndp::sim]]
 void func(void* args) {
-    int id = *(int*)args;
-    for (;;) {
-        std::cout << id << std::endl;
+    size_t volatile* ptr = (size_t volatile*)args;
+    for (size_t i = 0; i < 1000; i++) {
+        *ptr = i;
     }
+    std::cout << "ok\n";
 }
 
 int main() {
-    for (int i = 0; i < 4; ++i) {
-        ndp::thread_launch(i % 2, func, new int{i});
+    for (size_t i = 0; i < 64; ++i) {
+        ndp::thread_launch(i % 2, func, new size_t{i});
     }
     ndp::run();
 }
